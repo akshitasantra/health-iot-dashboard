@@ -1,23 +1,25 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from backend.routers import devices, health  # import your routers
 
+# 1️⃣ Create the FastAPI app first
 app = FastAPI()
 
+# 2️⃣ Add CORS middleware
+origins = ["http://localhost:5173"]  # Vite dev server URL
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Mock device data
-devices = [
-    {"deviceName": "Device A", "heart_rate": 72, "blood_pressure": "120/80", "temperature": 98.6},
-    {"deviceName": "Device B", "heart_rate": 65, "blood_pressure": "115/75", "temperature": 97.9},
-    {"deviceName": "Device C", "heart_rate": 80, "blood_pressure": "130/85", "temperature": 99.1},
-]
+# 3️⃣ Include your routers
+app.include_router(devices.router)
+app.include_router(health.router)
 
-@app.get("/devices")
-def get_devices():
-    return devices
+# 4️⃣ Optional root endpoint
+@app.get("/")
+def root():
+    return {"message": "Health IoT Dashboard is running!"}

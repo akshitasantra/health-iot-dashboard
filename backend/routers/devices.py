@@ -1,21 +1,24 @@
-from fastapi import APIRouter, Depends
-from sqlalchemy.orm import Session
-from ..database import SessionLocal
-from ..models import DeviceData
+from fastapi import APIRouter
+from typing import List
+from pydantic import BaseModel
 
-router = APIRouter()
+router = APIRouter(
+    prefix="/devices",
+    tags=["devices"]
+)
 
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
+# Pydantic model for a device
+class Device(BaseModel):
+    id: int
+    name: str
+    readings: List[int]
 
-@router.post("/data")
-def add_data(device_id: str, heart_rate: float, blood_pressure: str, db: Session = Depends(get_db)):
-    new_data = DeviceData(device_id=device_id, heart_rate=heart_rate, blood_pressure=blood_pressure)
-    db.add(new_data)
-    db.commit()
-    db.refresh(new_data)
-    return new_data
+# Example in-memory devices data
+devices_db = [
+    {"id": 1, "name": "Heart Rate Sensor", "readings": [72, 75, 73]},
+    {"id": 2, "name": "Temperature Sensor", "readings": [98, 99, 100]},
+]
+
+@router.get("/", response_model=List[Device])
+def get_devices():
+    return devices_db
