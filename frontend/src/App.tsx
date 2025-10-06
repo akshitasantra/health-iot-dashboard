@@ -23,13 +23,14 @@ type Patient = {
 const MAX_POINTS = 50;
 const REDRAW_MS = 50;
 
-export default function App(): JSX.Element {
+export default function App(){
   const [patients, setPatients] = useState<Patient[]>([]);
   const [healthSummaries, setHealthSummaries] = useState<Record<number, string>>({});
   const [summaryHighlights, setSummaryHighlights] = useState<Record<number, boolean>>({});
   const patientsRef = useRef<Patient[]>([]);
   const wsRef = useRef<WebSocket | null>(null);
   const chartRefs = useRef<Record<string, Chart | null>>({});
+  const [lastUpdated, setLastUpdated] = useState<string>("—");
 
   // keep ref synced
   useEffect(() => {
@@ -107,6 +108,8 @@ export default function App(): JSX.Element {
         });
 
         setPatients(mapped);
+        setLastUpdated(new Date().toLocaleTimeString());
+
       } catch (e) {
         console.error("Failed to parse WS message", e);
       }
@@ -217,7 +220,27 @@ export default function App(): JSX.Element {
   const rightPanelStyle: React.CSSProperties = { padding: 16, borderLeft: "1px solid #e5e7eb", background: "#fafafa", overflowY: "auto", boxSizing: "border-box", width: "100%" };
 
   return (
-    <div style={containerStyle}>
+    <div style={{ height: "100vh", background: "#f1f5f9", fontFamily: "Inter, Arial, sans-serif", display: "flex", flexDirection: "column" }}>
+      {/* Header */}
+      <header style={{ padding: "12px 20px", borderBottom: "1px solid #e6e9ee", background: "#ffffff", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+        <div>
+          <h1 style={{ margin: 0, fontSize: 20, fontWeight: 800 }}>Health IoT Dashboard</h1>
+          <div style={{ fontSize: 12, color: "#6b7280", marginTop: 4 }}>
+            Last updated: <span style={{ fontWeight: 700, color: "#374151" }}>{lastUpdated}</span>
+          </div>
+        </div>
+        {/* small right-side place for live status if desired */}
+        <div style={{ fontSize: 12, color: "#6b7280" }}>Live</div>
+      </header>
+
+      {/* Main grid (keeps your existing containerStyle, left/center/right panels) */}
+      <div style={{
+        display: "grid",
+        gridTemplateColumns: "34% 1fr 320px",
+        flex: 1,            // allow grid to take remaining height
+        overflow: "hidden"  // keep panels layout stable
+      }}>
+
       {/* LEFT: Patients */}
       <div style={leftPanelStyle}>
         <h1 style={{ margin: 0, marginBottom: 12 }}>Patients</h1>
@@ -356,8 +379,8 @@ export default function App(): JSX.Element {
             </div>
           </div>
         </div>
-
       </div>
+    </div>
     </div>
   );
 }
