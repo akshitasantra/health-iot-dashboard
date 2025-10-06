@@ -26,71 +26,50 @@ const REDRAW_MS = 50; // redraw loop interval
 export default function App() {
   const [patients, setPatients] = useState<Patient[]>([]);
   const [healthSummaries, setHealthSummaries] = useState<Record<number, string>>({});
+  const patientsRef = useRef<Patient[]>([]);
   const wsRef = useRef<WebSocket | null>(null);
-  const chartRefs = useRef<Record<string, Chart | null>>({}); // keyed refs
+  const chartRefs = useRef<Record<string, Chart | null>>({});
 
-  // helper: dedupe devices by name (keeps last occurrence)
+  // keep ref in sync
+  useEffect(() => {
+    patientsRef.current = patients;
+  }, [patients]);
+
+  // dedupe by id if present, otherwise by name
   const dedupeDevices = (devices: Device[]): Device[] => {
-    const map = new Map<string, Device>();
-    for (const d of devices) map.set(d.name, d);
+    const map = new Map<string | number, Device>();
+    for (const d of devices) {
+      const key = d.id ?? d.name;
+      map.set(key, d);
+    }
     return Array.from(map.values());
   };
 
-  // normalize battery to 0..100 (accepts either 0..1 or 0..100)
   const normalizeBattery = (raw: number | undefined): number => {
     if (raw === undefined || raw === null) return 0;
     if (raw <= 1) return Math.round(raw * 100);
     return Math.round(raw);
   };
 
-  // patient-level battery: worst (minimum) device battery, expressed 0..100
   const patientBatteryPercent = (devices: Device[]): number => {
     if (!devices || devices.length === 0) return 0;
     const values = devices.map((d) => normalizeBattery(d.battery));
     return Math.min(...values);
   };
 
-  // pick color from battery percentage (used for left stripe)
   const batteryColorFromPercent = (pct: number): string => {
-    if (pct < 40) return "#ef4444"; // red
-    if (pct < 75) return "#eab308"; // yellow
-    return "#16a34a"; // green
+    if (pct < 40) return "#ef4444";
+    if (pct < 75) return "#eab308";
+    return "#16a34a";
   };
 
-  // map alert level to chart color
   const alertColor = (level?: "green" | "yellow" | "red") => {
     if (level === "red") return { border: "#ef4444", fill: "rgba(239,68,68,0.08)" };
     if (level === "yellow") return { border: "#eab308", fill: "rgba(234,179,8,0.08)" };
     return { border: "#16a34a", fill: "rgba(22,163,74,0.08)" };
   };
 
-  // AI summaries every 30s
-  useEffect(() => {
-    const generateSummary = () => {
-      const summaries: Record<number, string> = {};
-      patients.forEach((p) => {
-        const avgTemp =
-          p.devices.reduce((acc, d) => acc + (d.temperature ?? 0), 0) /
-          (p.devices.length || 1);
-        const avgHR =
-          p.devices.reduce((acc, d) => acc + (d.heartRate ?? 0), 0) /
-          (p.devices.length || 1);
-
-        let summary = `${p.name}: Vitals stable.`;
-        if (avgTemp > 99) summary = `${p.name}: Temperature slightly elevated.`;
-        if (avgHR > 100) summary = `${p.name}: Elevated heart rate detected.`;
-
-        summaries[p.id] = summary;
-      });
-      setHealthSummaries(summaries);
-    };
-
-    generateSummary();
-    const interval = setInterval(generateSummary, 30000); // 30s
-    return () => clearInterval(interval);
-  }, [patients]);
-
-  // connect to WS and update state; convert readings to desired shape
+  // WebSocket connect + robust parsing
   useEffect(() => {
     const ws = new WebSocket("ws://localhost:8000/ws/patients");
     wsRef.current = ws;
@@ -101,16 +80,26 @@ export default function App() {
 
     ws.onmessage = (ev) => {
       try {
-        const incoming: any[] = JSON.parse(ev.data);
-        const mapped: Patient[] = incoming.map((p) => {
+        const incoming = JSON.parse(ev.data);
+        console.debug("WS frame:", incoming);
+
+        // Expect incoming to be an array of patients
+        const mapped: Patient[] = (incoming || []).map((p: any) => {
           const devices: Device[] = dedupeDevices(
             (p.devices ?? []).map((d: any) => {
-              const readings: Reading[] =
-                (d.readings ?? []).map((r: any) => {
-                  if (r.time && typeof r.time === "number")
-                    return { time: new Date(r.time * 1000).toLocaleTimeString(), value: r.value };
-                  return { time: r.time ?? new Date().toLocaleTimeString(), value: r.value ?? 0 };
-                }) ?? [];
+              // Normalize readings: allow numbers, plain arrays, or {time,value}
+              const rawReadings = d.readings ?? [];
+              const readings: Reading[] = rawReadings.map((r: any) => {
+                if (r === null || r === undefined) return { time: new Date().toLocaleTimeString(), value: 0 };
+                // an entry like 72 or {value:72}
+                if (typeof r === "number") return { time: new Date().toLocaleTimeString(), value: r };
+                if (typeof r === "object") {
+                  const value = r.value ?? (typeof r === "number" ? r : 0);
+                  const time = r.time ? (typeof r.time === "number" ? new Date(r.time * 1000).toLocaleTimeString() : String(r.time)) : new Date().toLocaleTimeString();
+                  return { time, value };
+                }
+                return { time: new Date().toLocaleTimeString(), value: Number(r) || 0 };
+              });
 
               const clipped = readings.slice(-MAX_POINTS);
 
@@ -140,19 +129,48 @@ export default function App() {
     };
 
     return () => {
-      ws.close();
+      try {
+        ws.close();
+      } catch {}
       wsRef.current = null;
     };
   }, []);
 
-  // Smooth redraw loop to update Chart.js instances without animation jump
+  // Single stable interval for health summary (reads patientsRef.current)
+  useEffect(() => {
+    const generateSummaryFromRef = () => {
+      const current = patientsRef.current;
+      const summaries: Record<number, string> = {};
+      for (const p of current) {
+        // compute average across devices that have the metric
+        const temps = p.devices.filter((d) => d.temperature != null).map((d) => d.temperature as number);
+        const hrs = p.devices.filter((d) => d.heartRate != null).map((d) => d.heartRate as number);
+        const avgTemp = temps.length ? temps.reduce((a, b) => a + b, 0) / temps.length : 0;
+        const avgHR = hrs.length ? hrs.reduce((a, b) => a + b, 0) / hrs.length : 0;
+
+        let summary = `${p.name}: Vitals stable.`;
+        if (avgTemp > 99) summary = `${p.name}: Temperature slightly elevated.`;
+        if (avgHR > 100) summary = `${p.name}: Elevated heart rate detected.`;
+
+        summaries[p.id] = summary;
+      }
+      setHealthSummaries(summaries);
+    };
+
+    // run once immediately
+    generateSummaryFromRef();
+    const interval = setInterval(generateSummaryFromRef, 30_000); // 30s
+    return () => clearInterval(interval);
+  }, []); // empty so interval created only once
+
+  // Smooth redraw loop for Chart.js
   useEffect(() => {
     let rafId: number | null = null;
     const tick = () => {
       Object.values(chartRefs.current).forEach((c) => {
         try {
           if (c && (c as any).update) (c as any).update("none");
-        } catch (e) {}
+        } catch {}
       });
       rafId = window.setTimeout(() => requestAnimationFrame(tick), REDRAW_MS) as unknown as number;
     };
@@ -162,39 +180,17 @@ export default function App() {
     };
   }, []);
 
-  // inline styles & layout (improvements)
+  // layout styles
   const containerStyle: React.CSSProperties = {
     display: "grid",
-    gridTemplateColumns: "34% 1fr 320px", // left fixed-ish, center flexible, right fixed
+    gridTemplateColumns: "34% 1fr 320px",
     height: "100vh",
     background: "#f1f5f9",
     fontFamily: "Inter, Arial, sans-serif",
-    // no overflow: hidden here — allows center to expand and right panel to reach the edge
   };
-
-  const leftPanelStyle: React.CSSProperties = {
-    padding: 16,
-    overflowY: "auto",
-    borderRight: "1px solid #e5e7eb",
-    background: "#f8fafc",
-    minWidth: 280,
-  };
-
-  const centerPanelStyle: React.CSSProperties = {
-    padding: 16,
-    overflowY: "auto",
-    boxSizing: "border-box",
-    minWidth: 420, // prevents center collapse which was clipping charts
-  };
-
-  const rightPanelStyle: React.CSSProperties = {
-    padding: 16,
-    borderLeft: "1px solid #e5e7eb",
-    background: "#fafafa",
-    overflowY: "auto",
-    boxSizing: "border-box",
-    width: "100%",
-  };
+  const leftPanelStyle: React.CSSProperties = { padding: 16, overflowY: "auto", borderRight: "1px solid #e5e7eb", background: "#f8fafc", minWidth: 280 };
+  const centerPanelStyle: React.CSSProperties = { padding: 16, overflowY: "auto", boxSizing: "border-box", minWidth: 420 };
+  const rightPanelStyle: React.CSSProperties = { padding: 16, borderLeft: "1px solid #e5e7eb", background: "#fafafa", overflowY: "auto", boxSizing: "border-box", width: "100%" };
 
   return (
     <div style={containerStyle}>
@@ -205,37 +201,13 @@ export default function App() {
           {patients.map((p) => {
             const batteryPct = patientBatteryPercent(p.devices);
             const leftStripe = batteryColorFromPercent(batteryPct);
-
             return (
-              <div
-                key={p.id}
-                style={{
-                  background: "#fff",
-                  borderRadius: 12,
-                  boxShadow: "0 6px 18px rgba(0,0,0,0.06)",
-                  display: "flex",
-                  gap: 12,
-                  padding: 16,
-                  borderLeft: `8px solid ${leftStripe}`,
-                  alignItems: "flex-start",
-                }}
-              >
+              <div key={p.id} style={{ background: "#fff", borderRadius: 12, boxShadow: "0 6px 18px rgba(0,0,0,0.06)", display: "flex", gap: 12, padding: 16, borderLeft: `8px solid ${leftStripe}`, alignItems: "flex-start" }}>
                 <div style={{ flex: 1 }}>
                   <div style={{ fontSize: 16, fontWeight: 700, marginBottom: 8 }}>{p.name}</div>
                   <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                     {p.devices.map((d) => (
-                      <div
-                        key={d.name}
-                        style={{
-                          padding: 8,
-                          borderRadius: 8,
-                          background: "#f3f4f6",
-                          border: "1px solid #e5e7eb",
-                          display: "flex",
-                          justifyContent: "space-between",
-                          alignItems: "center",
-                        }}
-                      >
+                      <div key={d.id ?? d.name} style={{ padding: 8, borderRadius: 8, background: "#f3f4f6", border: "1px solid #e5e7eb", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                         <div style={{ fontWeight: 600 }}>{d.name}</div>
                         <div style={{ textAlign: "right", minWidth: 80 }}>
                           <div style={{ fontSize: 12, color: "#6b7280" }}>🔋</div>
@@ -251,13 +223,13 @@ export default function App() {
         </div>
       </div>
 
-      {/* CENTER: Telemetry grid */}
+      {/* CENTER */}
       <div style={centerPanelStyle}>
         <h1 style={{ margin: 0, marginBottom: 12 }}>Live Telemetry</h1>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(300px, 1fr))", gap: 12 }}>
           {patients.flatMap((p) =>
-            p.devices.map((d, idx) => {
-              const key = `${p.id}__${d.name}`;
+            p.devices.map((d) => {
+              const key = `${p.id}__${d.id ?? d.name}`;
               const colors = alertColor(d.alertLevel);
               return (
                 <div key={key} style={{ background: "#fff", borderRadius: 10, padding: 12, boxShadow: "0 4px 12px rgba(0,0,0,0.04)", border: "1px solid #e6e9ee" }}>
@@ -265,14 +237,13 @@ export default function App() {
                     <div style={{ fontWeight: 700 }}>{p.name} — {d.name}</div>
                     <div style={{ color: colors.border, fontWeight: 700 }}>{(d.alertLevel ?? "green").toUpperCase()}</div>
                   </div>
-
                   <div style={{ height: 140 }}>
                     <Line
                       ref={(el) => {
-                        // use keyed refs; keep one entry per chart
+                        // keyed refs (replace previous)
                         // @ts-ignore
                         const chart = el?.chart ?? null;
-                        if (chart) chartRefs.current[key] = chart;
+                        chartRefs.current[key] = chart;
                       }}
                       data={{
                         labels: d.readings.map((r) => r.time),
@@ -306,10 +277,9 @@ export default function App() {
         </div>
       </div>
 
-      {/* RIGHT: AI Health Summary */}
+      {/* RIGHT */}
       <div style={rightPanelStyle}>
         <h1 style={{ margin: 0, marginBottom: 12 }}>AI Health Summary</h1>
-
         {patients.map((p) => {
           const summary = healthSummaries[p.id] ?? "Analyzing vitals...";
           return (
