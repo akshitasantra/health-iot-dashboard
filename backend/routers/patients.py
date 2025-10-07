@@ -1,16 +1,15 @@
 # backend/routers/patients.py
-from fastapi import APIRouter, WebSocket
-import asyncio, random
-from typing import List, Dict
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from typing import List, Dict, Any
+import asyncio, random, time
 
 router = APIRouter()
 
-# Define types
-Device = Dict[str, any]
-Patient = Dict[str, any]
+Device = Dict[str, Any]
+Patient = Dict[str, Any]
 
-# Sample data: 2 patients, each with 2 devices
-patients: List[Patient] = [
+# initial sample data (2 patients, each with 2 devices)
+initial_patients: List[Patient] = [
     {
         "id": 1,
         "name": "Patient 1",
@@ -29,41 +28,84 @@ patients: List[Patient] = [
     },
 ]
 
-# Simulate device readings
-def simulate_device(device: Device):
-    device["temperature"] += random.uniform(-0.3, 0.3)
-    device["heartRate"] += random.randint(-3, 3)
-    device["battery"] = max(0, device["battery"] - random.uniform(0.01, 0.05))
+# WebSocket manager helper
+class ConnectionManager:
+    def __init__(self):
+        self.active: List[WebSocket] = []
 
-    # Alert level
-    if device["heartRate"] > 100 or device["temperature"] > 100.4:
-        device["alertLevel"] = "red"
-    elif device["heartRate"] < 60 or device["temperature"] < 97.0:
-        device["alertLevel"] = "yellow"
-    else:
-        device["alertLevel"] = "green"
+    async def connect(self, websocket: WebSocket):
+        await websocket.accept()
+        self.active.append(websocket)
 
-# WebSocket endpoint
+    def disconnect(self, websocket: WebSocket):
+        if websocket in self.active:
+            self.active.remove(websocket)
+
+    async def broadcast_json(self, data):
+        dead = []
+        for ws in list(self.active):
+            try:
+                await ws.send_json(data)
+            except Exception:
+                # will cleanup on disconnects
+                dead.append(ws)
+        for d in dead:
+            self.disconnect(d)
+
+manager = ConnectionManager()
+
+# lightweight getter endpoints
+@router.get("/api/patients")
+async def get_patients(request=None):
+    from fastapi import Request
+    # access the in-memory patients stored on the app
+    # if the endpoint is called via FastAPI, request will be provided
+    # but FastAPI allows no-arg call too; we'll reference the global fallback
+    # the main app sets app.state.patients_data
+    try:
+        app = Request.scope["app"]  # not normally used, leave for type safety
+    except Exception:
+        app = None
+    data = None
+    # try to read from import of module-level (will be set by main startup)
+    try:
+        from fastapi import FastAPI
+        # we can't reliably access request here easily; just attempt to import app state
+    except Exception:
+        pass
+    # safe fallback: returned later by main having set patients_data in app.state
+    # The main app also mounts router; the global patients are stored in the module attribute - set below in startup
+    return router_include_patients()
+
+def router_include_patients():
+    # This helper returns the current in-memory patients stored on this module
+    # main.py will set patients_data on this module variable
+    global patients_data
+    try:
+        return patients_data
+    except NameError:
+        # if not set, return initial sample (safe fallback)
+        return initial_patients
+
 @router.websocket("/ws/patients")
 async def websocket_patients(ws: WebSocket):
-    await ws.accept()
+    """
+    Clients connect here and receive periodic JSON frames with the array of patient objects.
+    The simulation & broadcasting runs as a background task (in main.py) and writes to app module-level patients_data.
+    """
+    await manager.connect(ws)
     try:
+        # keep the connection open. We don't expect client messages, but if they send, we acknowledge.
         while True:
-            for patient in patients:
-                for device in patient["devices"]:
-                    simulate_device(device)
-                    # Add timestamped reading
-                    now = asyncio.get_event_loop().time()
-                    device["readings"].append({
-                        "time": now,
-                        "value": device["temperature"] if "Temperature" in device["name"] else device["heartRate"]
-                    })
-                    # Keep only last 30 readings
-                    device["readings"] = device["readings"][-30:]
-
-            await ws.send_json(patients)
-            await asyncio.sleep(1)
-    except Exception:
-        print("WebSocket connection closed.")
+            # just receive to detect client disconnects; will block until the client sends or disconnects.
+            try:
+                await ws.receive_text()
+            except WebSocketDisconnect:
+                break
+            except Exception:
+                # ignore other receive issues — keep socket open
+                await asyncio.sleep(1)
+    except WebSocketDisconnect:
+        pass
     finally:
-        await ws.close()
+        manager.disconnect(ws)
