@@ -10,7 +10,7 @@ export interface HealthData {
   oxygenLevel: number;
 }
 
-const API_URL = "http://127.0.0.1:8000";
+const API_URL = "http://127.0.0.1:5000";
 
 export const fetchDevices = async (): Promise<Device[]> => {
   const res = await fetch(`${API_URL}/devices`);

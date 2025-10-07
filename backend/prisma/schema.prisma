@@ -1,0 +1,34 @@
+// prisma/schema.prisma
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DB_URL") // make sure DB_URL is set in your .env
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model Patient {
+  id      Int      @id @default(autoincrement())
+  name    String
+  age     Int
+  devices Device[] // 1 patient → many devices
+}
+
+model Device {
+  id        Int       @id @default(autoincrement())
+  name      String
+  battery   Float     @default(100)
+  patient   Patient   @relation(fields: [patientId], references: [id])
+  patientId Int
+  readings  Reading[]
+}
+
+model Reading {
+  id        Int      @id @default(autoincrement())
+  device    Device   @relation(fields: [deviceId], references: [id])
+  deviceId  Int
+  value     Float
+  timestamp DateTime @default(now())
+}

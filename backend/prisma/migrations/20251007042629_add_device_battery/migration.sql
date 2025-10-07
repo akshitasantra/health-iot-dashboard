@@ -1,0 +1,2 @@
+-- AlterTable
+ALTER TABLE "Device" ADD COLUMN     "battery" DOUBLE PRECISION NOT NULL DEFAULT 100;

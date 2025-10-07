@@ -22,22 +22,51 @@ type Patient = {
 
 const MAX_POINTS = 50;
 const REDRAW_MS = 50;
+const backendHost = import.meta.env.VITE_BACKEND_HOST || window.location.host;
+
 
 export default function App(){
   const [patients, setPatients] = useState<Patient[]>([]);
-  const [healthSummaries, setHealthSummaries] = useState<Record<number, string>>({});
-  const [summaryHighlights, setSummaryHighlights] = useState<Record<number, boolean>>({});
+  const [healthSummaries, setHealthSummaries] = useState<{
+    [patientId: string]: { summary: string; lastUpdated: number | null };
+    }>({});
+    const [summaryHighlights, setSummaryHighlights] = useState<{ [patientId: string]: boolean }>({});
+    
   const patientsRef = useRef<Patient[]>([]);
   const wsRef = useRef<WebSocket | null>(null);
   const chartRefs = useRef<Record<string, Chart | null>>({});
   const [lastUpdated, setLastUpdated] = useState<string>("—");
-
+  
   // keep ref synced
   useEffect(() => {
     patientsRef.current = patients;
   }, [patients]);
 
   // helper functions (same as before)
+  function computePatientAnalytics(patient: Patient) {
+    const temps = patient.devices
+      .filter((d) => typeof d.temperature === "number")
+      .map((d) => d.temperature as number);
+
+    const hrs = patient.devices
+      .filter((d) => typeof d.heartRate === "number")
+      .map((d) => d.heartRate as number);
+
+    const avg = (arr: number[]) => (arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : NaN);
+    const min = (arr: number[]) => (arr.length ? Math.min(...arr) : NaN);
+    const max = (arr: number[]) => (arr.length ? Math.max(...arr) : NaN);
+
+    return {
+      avgTemp: avg(temps),
+      minTemp: min(temps),
+      maxTemp: max(temps),
+      avgHR: avg(hrs),
+      minHR: min(hrs),
+      maxHR: max(hrs),
+      deviceCount: patient.devices.length,
+    };
+  }
+
   const normalizeBattery = (raw: number | undefined): number => {
     if (raw === undefined || raw === null) return 0;
     if (raw <= 1) return Math.round(raw * 100);
@@ -62,40 +91,187 @@ export default function App(){
     return { border: "#16a34a", fill: "rgba(22,163,74,0.08)" };
   };
 
-  // robust WS parsing (expect array of patients)
+  const [analytics, setAnalytics] = useState({
+    avgTemp: 0,
+    minTemp: 0,
+    maxTemp: 0,
+    avgHR: 0,
+    minHR: 0,
+    maxHR: 0,
+    deviceCount: 0,
+  });
+
   useEffect(() => {
-    const ws = new WebSocket("ws://localhost:8000/ws/patients");
-    wsRef.current = ws;
+    let temps: number[] = [];
+    let hrs: number[] = [];
+    let deviceCount = 0;
 
-    ws.onopen = () => console.info("WS open -> /ws/patients");
-    ws.onerror = (e) => console.warn("WS error", e);
-    ws.onclose = () => console.info("WS closed");
+    patients.forEach((p) => {
+      p.devices.forEach((d) => {
+        deviceCount += 1;
+        if (typeof d.temperature === "number") temps.push(d.temperature);
+        if (typeof d.heartRate === "number") hrs.push(d.heartRate);
+      });
+    });
 
-    ws.onmessage = (ev) => {
+    setAnalytics({
+      avgTemp: temps.length ? temps.reduce((a, b) => a + b, 0) / temps.length : 0,
+      minTemp: temps.length ? Math.min(...temps) : 0,
+      maxTemp: temps.length ? Math.max(...temps) : 0,
+      avgHR: hrs.length ? hrs.reduce((a, b) => a + b, 0) / hrs.length : 0,
+      minHR: hrs.length ? Math.min(...hrs) : 0,
+      maxHR: hrs.length ? Math.max(...hrs) : 0,
+      deviceCount,
+    });
+  }, [patients]);
+
+
+  useEffect(() => {
+    // dynamic ws url:
+    location.hostname === "127.0.0.1";
+    const WS_PORT = 5000;
+    const host = import.meta.env.VITE_BACKEND_HOST || "localhost";
+    const WS_URL = `ws://${host}/ws/patients`; // do NOT append :5000 if host already includes port
+
+
+    console.log("Attempting WS connection to", WS_URL);
+
+    let ws: WebSocket | null = null;
+    let reconnectAttempts = 0;
+    let reconnectTimer: number | null = null;
+    const MAX_RECONNECT_DELAY = 30_000; // 30s
+
+    const connect = () => {
+      ws = new WebSocket(WS_URL);
+      wsRef.current = ws;
+
+      ws.onopen = () => {
+        console.info("WS connected", WS_URL);
+        reconnectAttempts = 0;
+      };
+
+      ws.onerror = (err) => {
+        console.warn("WS error", err);
+      };
+
+      ws.onclose = (ev) => {
+        console.info("WS closed", ev.code, ev.reason);
+        // try to reconnect with backoff
+        reconnectAttempts += 1;
+        const delay = Math.min(1000 * 2 ** reconnectAttempts, MAX_RECONNECT_DELAY);
+        if (reconnectTimer) window.clearTimeout(reconnectTimer);
+        reconnectTimer = window.setTimeout(() => connect(), delay);
+      };
+
+      ws.onmessage = (ev) => {
+        try {
+          const incoming = JSON.parse(ev.data); // expected: Patient[]
+          if (!Array.isArray(incoming)) return;
+
+          // inside ws.onmessage: replace the device mapping with this
+          const mapped: Patient[] = incoming.map((p: any) => {
+            const devices: Device[] = (p.devices ?? []).map((d: any) => {
+              const rawReadings = d.readings ?? [];
+
+              // normalize readings (same as you already do)
+              const readings: Reading[] = rawReadings.map((r: any) => {
+                try {
+                  if (r == null) return { time: new Date().toLocaleTimeString(), value: 0 };
+                  if (typeof r === "number") return { time: new Date().toLocaleTimeString(), value: r };
+                  if (typeof r === "object") {
+                    const value = typeof r.value === "number" ? r.value : Number(r.value ?? r) || 0;
+                    let timeStr = new Date().toLocaleTimeString();
+                    if (r.time) {
+                      if (typeof r.time === "number") timeStr = new Date(r.time * 1000).toLocaleTimeString();
+                      else timeStr = String(r.time);
+                    }
+                    return { time: timeStr, value };
+                  }
+                  return { time: new Date().toLocaleTimeString(), value: Number(r) || 0 };
+                } catch {
+                  return { time: new Date().toLocaleTimeString(), value: 0 };
+                }
+              });
+
+              // ---- NEW: infer latest sensor numeric value from readings ----
+              const latestReading = rawReadings.length ? rawReadings[rawReadings.length - 1] : null;
+              const latestValue = latestReading ? (typeof latestReading === "object" ? Number(latestReading.value ?? 0) : Number(latestReading)) : 0;
+
+              // decide where latestValue should live: temperature or heartRate
+              let inferredTemp: number | undefined = undefined;
+              let inferredHR: number | undefined = undefined;
+              const name = String(d.name ?? "").toLowerCase();
+              if (name.includes("temp")) inferredTemp = latestValue;
+              if (name.includes("heart")) inferredHR = latestValue;
+
+              return {
+                id: d.id,
+                name: d.name,
+                // prefer explicit fields if backend provided them; otherwise use inferred value
+                temperature: typeof d.temperature === "number" ? d.temperature : inferredTemp,
+                heartRate: typeof d.heartRate === "number" ? d.heartRate : inferredHR,
+                battery: typeof d.battery === "number" ? d.battery : 0,
+                alertLevel: d.alertLevel ?? "green",
+                readings: readings.slice(-MAX_POINTS),
+              } as Device;
+            });
+
+            return {
+              id: p.id,
+              name: p.name,
+              devices,
+            } as Patient;
+          });
+
+          setPatients(mapped);
+          setLastUpdated(new Date().toLocaleTimeString());
+        } catch (err) {
+          console.error("Failed to parse WS message", err);
+        }
+      };
+    };
+
+    const tryFetchInitial = async () => {
       try {
-        const incoming = JSON.parse(ev.data);
-        // map incoming -> Patient[]
-        const mapped: Patient[] = (incoming || []).map((p: any) => {
+        const resp = await fetch(`http://${backendHost}/api/patients`);
+        const json = await resp.json();
+        if (!Array.isArray(json)) return;
+
+        const mapped: Patient[] = json.map((p: any) => {
           const devices: Device[] = (p.devices ?? []).map((d: any) => {
             const rawReadings = d.readings ?? [];
             const readings: Reading[] = rawReadings.map((r: any) => {
               if (r == null) return { time: new Date().toLocaleTimeString(), value: 0 };
               if (typeof r === "number") return { time: new Date().toLocaleTimeString(), value: r };
               if (typeof r === "object") {
-                const value = typeof r.value === "number" ? r.value : Number(r) || 0;
-                const time = r.time ? (typeof r.time === "number" ? new Date(r.time * 1000).toLocaleTimeString() : String(r.time)) : new Date().toLocaleTimeString();
-                return { time, value };
+                const value = typeof r.value === "number" ? r.value : Number(r.value ?? r) || 0;
+                let timeStr = new Date().toLocaleTimeString();
+                if (r.time) {
+                  if (typeof r.time === "number") timeStr = new Date(r.time * 1000).toLocaleTimeString();
+                  else timeStr = String(r.time);
+                }
+                return { time: timeStr, value };
               }
               return { time: new Date().toLocaleTimeString(), value: Number(r) || 0 };
             });
 
+            // infer latest value
+            const latestReading = rawReadings.length ? rawReadings[rawReadings.length - 1] : null;
+            const latestValue = latestReading ? (typeof latestReading === "object" ? Number(latestReading.value ?? 0) : Number(latestReading)) : 0;
+
+            let inferredTemp: number | undefined = undefined;
+            let inferredHR: number | undefined = undefined;
+            const name = String(d.name ?? "").toLowerCase();
+            if (name.includes("temp")) inferredTemp = latestValue;
+            if (name.includes("heart")) inferredHR = latestValue;
+
             return {
               id: d.id,
               name: d.name,
-              temperature: d.temperature,
-              heartRate: d.heartRate,
-              battery: d.battery ?? 0,
+              battery: typeof d.battery === "number" ? d.battery : 0,
               alertLevel: d.alertLevel ?? "green",
+              temperature: typeof d.temperature === "number" ? d.temperature : inferredTemp,
+              heartRate: typeof d.heartRate === "number" ? d.heartRate : inferredHR,
               readings: readings.slice(-MAX_POINTS),
             } as Device;
           });
@@ -109,19 +285,24 @@ export default function App(){
 
         setPatients(mapped);
         setLastUpdated(new Date().toLocaleTimeString());
-
       } catch (e) {
-        console.error("Failed to parse WS message", e);
+        console.error("Failed to fetch initial patients", e);
       }
     };
 
+    // start
+    tryFetchInitial();
+    connect();
+
     return () => {
+      if (reconnectTimer) window.clearTimeout(reconnectTimer);
       try {
-        ws.close();
+        ws?.close();
       } catch {}
       wsRef.current = null;
     };
-  }, []);
+  }, []); // run only once on mount
+
 
   // stable interval for AI summaries (reads patientsRef.current)
   useEffect(() => {
@@ -144,16 +325,25 @@ export default function App(){
 
       // compare with previous and trigger highlight if changed
       setHealthSummaries((prev) => {
-        for (const idStr of Object.keys(newSummaries)) {
-          const id = Number(idStr);
-          if (prev[id] !== newSummaries[id]) {
-            // flash highlight
-            setSummaryHighlights((h) => ({ ...h, [id]: true }));
-            // remove highlight after 3s
-            setTimeout(() => setSummaryHighlights((h) => ({ ...h, [id]: false })), 3000);
+        const updated: typeof prev = { ...prev };
+        for (const p of current) {
+          const temps = p.devices.filter(d => typeof d.temperature === "number").map(d => d.temperature!);
+          const hrs = p.devices.filter(d => typeof d.heartRate === "number").map(d => d.heartRate!);
+          const avgTemp = temps.length ? temps.reduce((a, b) => a + b, 0) / temps.length : 0;
+          const avgHR = hrs.length ? hrs.reduce((a, b) => a + b, 0) / hrs.length : 0;
+
+          let summary = `${p.name}: Vitals stable.`;
+          if (avgTemp > 99) summary = `${p.name}: Temperature slightly elevated.`;
+          if (avgHR > 100) summary = `${p.name}: Elevated heart rate detected.`;
+
+          if (!prev[p.id] || prev[p.id].summary !== summary) {
+            setSummaryHighlights((h) => ({ ...h, [p.id]: true }));
+            setTimeout(() => setSummaryHighlights((h) => ({ ...h, [p.id]: false })), 3000);
           }
+
+          updated[p.id] = { summary, lastUpdated: Date.now() };
         }
-        return newSummaries;
+        return updated;
       });
     };
 
@@ -179,42 +369,8 @@ export default function App(){
     };
   }, []);
 
-  // Analytics footer calculation (derived from current patients)
-  const analytics = (() => {
-    const temps: number[] = [];
-    const hrs: number[] = [];
-    let deviceCount = 0;
-    patients.forEach((p) => {
-      p.devices.forEach((d) => {
-        deviceCount += 1;
-        if (typeof d.temperature === "number") temps.push(d.temperature);
-        if (typeof d.heartRate === "number") hrs.push(d.heartRate);
-      });
-    });
-
-    const avg = (arr: number[]) => (arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : 0);
-    const min = (arr: number[]) => (arr.length ? Math.min(...arr) : 0);
-    const max = (arr: number[]) => (arr.length ? Math.max(...arr) : 0);
-
-    return {
-      deviceCount,
-      avgTemp: avg(temps),
-      minTemp: min(temps),
-      maxTemp: max(temps),
-      avgHR: avg(hrs),
-      minHR: min(hrs),
-      maxHR: max(hrs),
-    };
-  })();
 
   // styles (keeps layout consistent)
-  const containerStyle: React.CSSProperties = {
-    display: "grid",
-    gridTemplateColumns: "34% 1fr 320px",
-    height: "100vh",
-    background: "#f1f5f9",
-    fontFamily: "Inter, Arial, sans-serif",
-  };
   const leftPanelStyle: React.CSSProperties = { padding: 16, overflowY: "auto", borderRight: "1px solid #e5e7eb", background: "#f8fafc", minWidth: 280 };
   const centerPanelStyle: React.CSSProperties = { padding: 16, overflowY: "auto", boxSizing: "border-box", minWidth: 420 };
   const rightPanelStyle: React.CSSProperties = { padding: 16, borderLeft: "1px solid #e5e7eb", background: "#fafafa", overflowY: "auto", boxSizing: "border-box", width: "100%" };
@@ -233,7 +389,7 @@ export default function App(){
         <div style={{ fontSize: 12, color: "#6b7280" }}>Live</div>
       </header>
 
-      {/* Main grid (keeps your existing containerStyle, left/center/right panels) */}
+      {/* Main grid */}
       <div style={{
         display: "grid",
         gridTemplateColumns: "34% 1fr 320px",
@@ -248,13 +404,46 @@ export default function App(){
           {patients.map((p) => {
             const batteryPct = patientBatteryPercent(p.devices);
             const leftStripe = batteryColorFromPercent(batteryPct);
+
+            // SORT devices: Heart first, Temperature second, then others
+            const sortedDevices = [...p.devices].sort((a, b) => {
+              if (a.name.toLowerCase().includes("heart")) return -1;
+              if (b.name.toLowerCase().includes("heart")) return 1;
+              if (a.name.toLowerCase().includes("temperature")) return -1;
+              if (b.name.toLowerCase().includes("temperature")) return 1;
+              return 0;
+            });
+
             return (
-              <div key={p.id} style={{ background: "#fff", borderRadius: 12, boxShadow: "0 6px 18px rgba(0,0,0,0.06)", display: "flex", gap: 12, padding: 16, borderLeft: `8px solid ${leftStripe}`, alignItems: "flex-start" }}>
+              <div
+                key={`patient-${p.id}`}
+                style={{
+                  background: "#fff",
+                  borderRadius: 12,
+                  boxShadow: "0 6px 18px rgba(0,0,0,0.06)",
+                  display: "flex",
+                  gap: 12,
+                  padding: 16,
+                  borderLeft: `8px solid ${leftStripe}`,
+                  alignItems: "flex-start",
+                }}
+              >
                 <div style={{ flex: 1 }}>
                   <div style={{ fontSize: 16, fontWeight: 700, marginBottom: 8 }}>{p.name}</div>
                   <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                    {p.devices.map((d) => (
-                      <div key={d.id ?? d.name} style={{ padding: 8, borderRadius: 8, background: "#f3f4f6", border: "1px solid #e5e7eb", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                    {sortedDevices.map((d) => (
+                      <div
+                        key={`device-${d.id ?? d.name}`}
+                        style={{
+                          padding: 8,
+                          borderRadius: 8,
+                          background: "#f3f4f6",
+                          border: "1px solid #e5e7eb",
+                          display: "flex",
+                          justifyContent: "space-between",
+                          alignItems: "center",
+                        }}
+                      >
                         <div style={{ fontWeight: 600 }}>{d.name}</div>
                         <div style={{ textAlign: "right", minWidth: 80 }}>
                           <div style={{ fontSize: 12, color: "#6b7280" }}>🔋</div>
@@ -274,8 +463,16 @@ export default function App(){
       <div style={centerPanelStyle}>
         <h1 style={{ margin: 0, marginBottom: 12 }}>Live Telemetry</h1>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(300px, 1fr))", gap: 12 }}>
-          {patients.flatMap((p) =>
-            p.devices.map((d) => {
+          {patients.flatMap((p) => {
+            const sortedDevices = [...p.devices].sort((a, b) => {
+              if (a.name.toLowerCase().includes("heart")) return -1;
+              if (b.name.toLowerCase().includes("heart")) return 1;
+              if (a.name.toLowerCase().includes("temperature")) return -1;
+              if (b.name.toLowerCase().includes("temperature")) return 1;
+              return 0;
+            });
+
+            return sortedDevices.map((d) => {
               const key = `${p.id}__${d.id ?? d.name}`;
               const colors = alertColor(d.alertLevel);
               return (
@@ -287,8 +484,6 @@ export default function App(){
                   <div style={{ height: 140 }}>
                     <Line
                       ref={(el) => {
-                        // store keyed chart reference
-                        // @ts-ignore
                         const chart = el?.chart ?? null;
                         chartRefs.current[key] = chart;
                       }}
@@ -319,66 +514,89 @@ export default function App(){
                   </div>
                 </div>
               );
-            })
-          )}
+            });
+          })}
         </div>
       </div>
-
       {/* RIGHT: AI summary + footer analytics */}
       <div style={rightPanelStyle}>
         <h1 style={{ margin: 0, marginBottom: 12 }}>AI Health Summary</h1>
 
         <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
           {patients.map((p) => {
-            const summary = healthSummaries[p.id] ?? "Analyzing vitals...";
+            const summaryData = healthSummaries[p.id] ?? { summary: "Analyzing vitals...", lastUpdated: null };
             const highlight = !!summaryHighlights[p.id];
+
             return (
-              <div key={p.id} style={{
-                background: "#fff",
-                border: "1px solid #e5e7eb",
-                borderRadius: 12,
-                padding: 16,
-                marginBottom: 6,
-                boxShadow: "0 4px 10px rgba(0,0,0,0.05)",
-                transition: "background-color 300ms ease",
-                // highlight effect:
-                backgroundColor: highlight ? "rgba(59,130,246,0.06)" : "#fff"
-              }}>
+              <div
+                key={p.id}
+                style={{
+                  background: highlight ? "rgba(59,130,246,0.06)" : "#fff",
+                  border: "1px solid #e5e7eb",
+                  borderRadius: 12,
+                  padding: 16,
+                  marginBottom: 6,
+                  boxShadow: "0 4px 10px rgba(0,0,0,0.05)",
+                  transition: "background-color 300ms ease",
+                }}
+              >
                 <div style={{ fontWeight: 700, marginBottom: 8 }}>{p.name}</div>
-                <div style={{ fontSize: 14, color: "#374151" }}>{summary}</div>
-                <div style={{ marginTop: 8, fontSize: 12, color: "#6b7280" }}>Last summary: {new Date().toLocaleTimeString()}</div>
+                <div style={{ fontSize: 14, color: "#374151" }}>{summaryData.summary}</div>
+                <div style={{ marginTop: 8, fontSize: 12, color: "#6b7280" }}>
+                  Last summary: {summaryData.lastUpdated ? new Date(summaryData.lastUpdated).toLocaleTimeString() : "N/A"}
+                </div>
               </div>
             );
           })}
         </div>
 
-        {/* Footer analytics panel */}
+        {/* Footer analytics panel (per-patient) */}
         <div style={{ marginTop: 18, borderTop: "1px solid #e6e9ee", paddingTop: 12 }}>
-          <h3 style={{ margin: "6px 0 12px 0" }}>Analytics (all devices)</h3>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-            <div style={{ background: "#fff", padding: 12, borderRadius: 8, border: "1px solid #e5e7eb" }}>
-              <div style={{ fontSize: 12, color: "#6b7280" }}>Avg Temperature</div>
-              <div style={{ fontWeight: 700, fontSize: 18 }}>{isFinite(analytics.avgTemp) ? analytics.avgTemp.toFixed(1) : "—"} °F</div>
-              <div style={{ fontSize: 12, color: "#6b7280", marginTop: 6 }}>
-                Min: {isFinite(analytics.minTemp) ? analytics.minTemp.toFixed(1) : "—"} • Max: {isFinite(analytics.maxTemp) ? analytics.maxTemp.toFixed(1) : "—"}
-              </div>
-            </div>
+          <h3 style={{ margin: "6px 0 12px 0" }}>Analytics (per patient)</h3>
 
-            <div style={{ background: "#fff", padding: 12, borderRadius: 8, border: "1px solid #e5e7eb" }}>
-              <div style={{ fontSize: 12, color: "#6b7280" }}>Avg Heart Rate</div>
-              <div style={{ fontWeight: 700, fontSize: 18 }}>{isFinite(analytics.avgHR) ? analytics.avgHR.toFixed(0) : "—"} BPM</div>
-              <div style={{ fontSize: 12, color: "#6b7280", marginTop: 6 }}>
-                Min: {isFinite(analytics.minHR) ? analytics.minHR.toFixed(0) : "—"} • Max: {isFinite(analytics.maxHR) ? analytics.maxHR.toFixed(0) : "—"}
-              </div>
-            </div>
+          <div style={{
+            display: "grid",
+            gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))",
+            gap: 12
+          }}>
+            {patients.map((p) => {
+              const pa = computePatientAnalytics(p);
 
-            <div style={{ gridColumn: "1 / -1", background: "#fff", padding: 12, borderRadius: 8, border: "1px solid #e5e7eb" }}>
-              <div style={{ fontSize: 12, color: "#6b7280" }}>Devices tracked</div>
-              <div style={{ fontWeight: 700, fontSize: 18 }}>{analytics.deviceCount}</div>
-              <div style={{ fontSize: 12, color: "#6b7280", marginTop: 6 }}>Updated live from backend telemetry</div>
-            </div>
+              return (
+                <div key={`analytics-${p.id}`} style={{ background: "#fff", padding: 12, borderRadius: 8, border: "1px solid #e5e7eb" }}>
+                  <div style={{ fontSize: 13, color: "#6b7280", marginBottom: 6 }}>{p.name}</div>
+
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+                    <div>
+                      <div style={{ fontSize: 12, color: "#6b7280" }}>Avg Temperature</div>
+                      <div style={{ fontWeight: 700, fontSize: 18 }}>
+                        {isFinite(pa.avgTemp) ? pa.avgTemp.toFixed(1) + " °F" : "—"}
+                      </div>
+                      <div style={{ fontSize: 12, color: "#6b7280", marginTop: 6 }}>
+                        Min: {isFinite(pa.minTemp) ? pa.minTemp.toFixed(1) : "—"} • Max: {isFinite(pa.maxTemp) ? pa.maxTemp.toFixed(1) : "—"}
+                      </div>
+                    </div>
+
+                    <div style={{ textAlign: "right" }}>
+                      <div style={{ fontSize: 12, color: "#6b7280" }}>Avg Heart Rate</div>
+                      <div style={{ fontWeight: 700, fontSize: 18 }}>
+                        {isFinite(pa.avgHR) ? Math.round(pa.avgHR) + " BPM" : "—"}
+                      </div>
+                      <div style={{ fontSize: 12, color: "#6b7280", marginTop: 6 }}>
+                        Min: {isFinite(pa.minHR) ? Math.round(pa.minHR) : "—"} • Max: {isFinite(pa.maxHR) ? Math.round(pa.maxHR) : "—"}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div style={{ marginTop: 10, fontSize: 12, color: "#6b7280" }}>
+                    Devices: <span style={{ fontWeight: 700, color: "#111" }}>{pa.deviceCount}</span>
+                  </div>
+                </div>
+              );
+            })}
           </div>
         </div>
+
       </div>
     </div>
     </div>
