@@ -1,0 +1,35 @@
+version: "3.8"
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    image: yourdockerhubuser/health-iot-backend:latest
+    env_file: ./backend/.env          # contains DATABASE_URL and others
+    ports:
+      - "5000:5000"
+    depends_on:
+      - db
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    image: yourdockerhubuser/health-iot-frontend:latest
+    ports:
+      - "80:80"
+    restart: unless-stopped
+
+  db:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: examplepassword
+      POSTGRES_DB: health_iot
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+volumes:
+  db-data:
