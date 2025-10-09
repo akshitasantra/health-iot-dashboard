@@ -91,15 +91,6 @@ export default function App(){
     return { border: "#16a34a", fill: "rgba(22,163,74,0.08)" };
   };
 
-  const [analytics, setAnalytics] = useState({
-    avgTemp: 0,
-    minTemp: 0,
-    maxTemp: 0,
-    avgHR: 0,
-    minHR: 0,
-    maxHR: 0,
-    deviceCount: 0,
-  });
 
   useEffect(() => {
     let temps: number[] = [];
@@ -113,23 +104,13 @@ export default function App(){
         if (typeof d.heartRate === "number") hrs.push(d.heartRate);
       });
     });
-
-    setAnalytics({
-      avgTemp: temps.length ? temps.reduce((a, b) => a + b, 0) / temps.length : 0,
-      minTemp: temps.length ? Math.min(...temps) : 0,
-      maxTemp: temps.length ? Math.max(...temps) : 0,
-      avgHR: hrs.length ? hrs.reduce((a, b) => a + b, 0) / hrs.length : 0,
-      minHR: hrs.length ? Math.min(...hrs) : 0,
-      maxHR: hrs.length ? Math.max(...hrs) : 0,
-      deviceCount,
-    });
   }, [patients]);
+
 
 
   useEffect(() => {
     // dynamic ws url:
     location.hostname === "127.0.0.1";
-    const WS_PORT = 5000;
     const host = import.meta.env.VITE_BACKEND_HOST || "localhost";
     const WS_URL = `ws://${host}/ws/patients`; // do NOT append :5000 if host already includes port
 
@@ -483,10 +464,6 @@ export default function App(){
                   </div>
                   <div style={{ height: 140 }}>
                     <Line
-                      ref={(el) => {
-                        const chart = el?.chart ?? null;
-                        chartRefs.current[key] = chart;
-                      }}
                       data={{
                         labels: d.readings.map((r) => r.time),
                         datasets: [
