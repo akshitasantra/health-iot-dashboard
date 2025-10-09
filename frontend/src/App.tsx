@@ -111,7 +111,7 @@ export default function App(){
   useEffect(() => {
     // dynamic ws url:
     location.hostname === "127.0.0.1";
-    const WS_URL = import.meta.env.VITE_WS_URL;
+    const WS_URL = import.meta.env.REACT_APP_WS_URL;
 
 
     console.log("Attempting WS connection to", WS_URL);
