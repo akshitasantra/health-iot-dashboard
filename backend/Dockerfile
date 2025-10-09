@@ -5,9 +5,10 @@ COPY package*.json ./
 RUN npm ci
 COPY prisma ./prisma/
 COPY . .
+RUN npm install prisma @prisma/client
+RUN chmod +x ./node_modules/.bin/prisma
 RUN npx prisma generate
-# if you compile TS, run build step here:
-# RUN npm run build
+
 
 FROM node:20-alpine
 WORKDIR /app
