@@ -8,6 +8,16 @@ const { WebSocketServer } = require("ws");
 const fs = require("fs");
 const prisma = new PrismaClient();
 const app = express();
+
+const cors = require('cors');
+
+// --- Enable CORS for local frontend dev ---
+app.use(cors({
+  origin: 'http://localhost:5173', // Vite dev server
+  credentials: true,
+}));
+
+
 const PORT = process.env.PORT || 5000;
 
 // --- CSP middleware (development-friendly) ---
