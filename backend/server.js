@@ -5,7 +5,7 @@ const express = require("express");
 const http = require("http");
 const { PrismaClient } = require("@prisma/client");
 const { WebSocketServer } = require("ws");
-
+const fs = require("fs");
 const prisma = new PrismaClient();
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -16,7 +16,7 @@ app.use((req, res, next) => {
     "Content-Security-Policy",
     [
       "default-src 'self'",
-      `connect-src 'self' ws://localhost:${PORT} http://localhost:${PORT}`,
+      `connect-src 'self' ws://18.212.75.149:${PORT} http://18.212.75.149:${PORT}`,
       "script-src 'self' 'unsafe-eval' 'unsafe-inline'",
       "style-src 'self' 'unsafe-inline'",
       "img-src 'self' data:",
@@ -32,20 +32,6 @@ let staticFolder = null;
 
 if (require("fs").existsSync(frontendDistVite)) staticFolder = frontendDistVite;
 else if (require("fs").existsSync(frontendDistCRA)) staticFolder = frontendDistCRA;
-
-if (staticFolder) {
-  console.log(`Serving frontend from: ${staticFolder}`);
-  app.use(express.static(staticFolder));
-
-  // SPA fallback
-  app.get("*", (req, res) => {
-    res.sendFile(path.join(staticFolder, "index.html"));
-  });
-} else {
-  app.get("/", (req, res) => {
-    res.send("Backend running. No frontend build found. Build React app into frontend/dist or frontend/build");
-  });
-}
 
 // --- HTTP server + WebSocket ---
 const server = http.createServer(app);
@@ -178,7 +164,6 @@ async function simulationTick() {
 // Start simulation loop
 setInterval(simulationTick, 1000);
 
-// --- Optional snapshot endpoint for first paint ---
 app.get("/api/patients", async (req, res) => {
   try {
     const snapshot = await fetchPatientsWithReadings();
@@ -189,8 +174,14 @@ app.get("/api/patients", async (req, res) => {
   }
 });
 
+// --- SPA fallback (put after all API routes!) ---
+if (staticFolder) {
+  app.get("*", (req, res) => {
+    res.sendFile(path.join(staticFolder, "index.html"));
+  });
+}
 // --- Start server ---
-server.listen(PORT, () => {
-  console.log(`Server running on http://localhost:${PORT}`);
-  console.log(`WebSocket endpoint: ws://localhost:${PORT}/ws/patients`);
+server.listen(PORT, "0.0.0.0", () => {
+  console.log(`Server running on http://0.0.0.0:${PORT}`);
+  console.log(`WebSocket endpoint: ws://0.0.0.0:${PORT}/ws/patients`);
 });

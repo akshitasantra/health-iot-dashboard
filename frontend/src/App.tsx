@@ -22,7 +22,7 @@ type Patient = {
 
 const MAX_POINTS = 50;
 const REDRAW_MS = 50;
-const backendHost = import.meta.env.VITE_BACKEND_HOST || window.location.host;
+const backendHost = import.meta.env.VITE_BACKEND_URL;
 
 
 export default function App(){
@@ -111,8 +111,7 @@ export default function App(){
   useEffect(() => {
     // dynamic ws url:
     location.hostname === "127.0.0.1";
-    const host = import.meta.env.VITE_BACKEND_HOST || "localhost";
-    const WS_URL = `ws://${host}/ws/patients`; // do NOT append :5000 if host already includes port
+    const WS_URL = import.meta.env.VITE_WS_URL;
 
 
     console.log("Attempting WS connection to", WS_URL);
@@ -214,7 +213,7 @@ export default function App(){
 
     const tryFetchInitial = async () => {
       try {
-        const resp = await fetch(`http://${backendHost}/api/patients`);
+        const resp = await fetch(`${backendHost}/api/patients`);
         const json = await resp.json();
         if (!Array.isArray(json)) return;
 
