@@ -6,7 +6,7 @@
     "test": "echo \"Error: no test specified\" && exit 1",
     "start": "node server.js",
     "build": "npm install && npm prisma generate",
-    "seed": "npx prisma db seed",
+    "seed": "node prisma/seed.js",
     "dev": "nodemon server.js"
   },
   "keywords": [],
