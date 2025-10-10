@@ -13,7 +13,7 @@ const cors = require('cors');
 
 // --- Enable CORS for local frontend dev ---
 app.use(cors({
-  origin: 'http://localhost:5173', // Vite dev server
+  origin: ['http://localhost:5173', "https://health-iot-dashboard-frontend-1.onrender.com"],
   credentials: true,
 }));
 
