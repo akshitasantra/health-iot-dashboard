@@ -284,7 +284,7 @@ export default function App(){
   }, []); // run only once on mount
 
 
-  // stable interval for AI summaries (reads patientsRef.current)
+  // stable interval for summaries (reads patientsRef.current)
   useEffect(() => {
     const generate = () => {
       const current = patientsRef.current;
@@ -494,9 +494,9 @@ export default function App(){
           })}
         </div>
       </div>
-      {/* RIGHT: AI summary + footer analytics */}
+      {/* RIGHT: summary + footer analytics */}
       <div style={rightPanelStyle}>
-        <h1 style={{ margin: 0, marginBottom: 12 }}>AI Health Summary</h1>
+        <h1 style={{ margin: 0, marginBottom: 12 }}>Health Summary</h1>
 
         <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
           {patients.map((p) => {
